@@ -2,7 +2,7 @@ import numpy as np
 from scipy.ndimage import maximum_filter
 import pandas as pd
 from sklearn.neighbors import NearestNeighbors
-
+import numba 
 import matplotlib.pyplot as plt
 # create circular kernel:
 
@@ -64,6 +64,34 @@ def determine_localmax(distribution, min_distance=3, min_expression=5):
 
 from sklearn.decomposition import PCA as Dimred
 
+def haversine_to_rgb(coords):
+    #project to unit sphere:
+    x = np.sin(coords[:, 0]) * np.cos(coords[:, 1])
+    y = np.sin(coords[:, 0]) * np.sin(coords[:, 1])
+    z = np.cos(coords[:, 0])
+
+    coords = np.array([x,y,z]).T
+
+    print(coords.shape)
+
+    #project to unit cube:
+    coords = coords/np.max(np.abs(coords),axis=1,keepdims=True)
+
+    return coords/2+0.5
+
+def rotate_points(data):
+    # Convert the angles to radians
+
+    
+    # Create the rotation matrix that rotates rgb values to cover the color space efficiently:
+    rotation_matrix = np.array([[-1.,  0.,  1.],
+                                [-1.,  1., -1.],
+                                [-1., -0.,  1.]])
+    
+    # Perform the rotation
+    rotated_data = data#np.dot(data, rotation_matrix)
+    
+    return rotated_data
 
 def fill_color_axes(rgb,dimred=None):
 
@@ -73,19 +101,10 @@ def fill_color_axes(rgb,dimred=None):
 
     facs = dimred.transform(rgb)
 
-    # rotate the ica_facs 45 in all the dimensions:
-    # define a 45-degree 3d rotation matrix 
-    # (0.500 | 0.500 | -0.707
-    # -0.146 | 0.854 | 0.500
-    # 0.854 | -0.146 | 0.500)
-    rotation_matrix = np.array([[0.500,0.500,-0.707],
-                                [-0.146,0.854,0.500],
-                                [0.854,-0.146,0.500]])
+    # rotate the facs to cover color axes efficiently:
+    facs = rotate_points(facs)
 
-    # rotate the facs:
-    facs = np.dot(facs,rotation_matrix)
-
-
+    # return facs,dimred
     return facs,dimred
 
 
@@ -106,70 +125,83 @@ def min_to_max(arr):
 def transform_embeddings(expression,pca,embedder_2d,embedder_3d):
 
     factors = pca.transform(expression)
-
-    embedding = embedder_2d.transform(factors)
     # embedding_color = embedder_3d.transform(factors)
-    embedding_color = embedder_3d.transform(embedding)
+    embedding_color = embedder_3d.transform(factors)
     
+    embedding = embedder_2d.transform(factors)
     # embedding_color = (embedding_color-color_min)/(color_max-color_min)
     
     return embedding, embedding_color
 
 # define a function that plots the embeddings, with celltype centers rendered as plt.texts on top:
-def plot_embeddings(embedding,embedding_color,celltype_centers,celltypes):
+def plot_embeddings(embedding,embedding_color,celltype_centers,celltypes,rasterized=False):
     colors = np.clip(embedding_color.copy(),0,1)
 
-    plt.scatter(embedding[:,0],embedding[:,1],c=(colors),alpha=0.1,marker='.')
+    plt.scatter(embedding[:,0],embedding[:,1],c=(colors),alpha=0.1,marker='.',rasterized=rasterized)
 
     text_artists = []
     for i in range(len(celltypes)):
-        t = plt.text(np.nan_to_num((celltype_centers[i,0])),np.nan_to_num(celltype_centers[i,1]),celltypes[i],color='k',fontsize=12)
-        text_artists.append(t)
+        cog_x,cog_y = (celltype_centers[i,0],celltype_centers[i,1])
+        if not any(np.isnan([cog_x,cog_y])):
+            t = plt.text(cog_x,cog_y,celltypes[i],color='k',fontsize=6)
+            text_artists.append(t)
 
     untangle_text(text_artists)
 
 def untangle_text(text_artists,max_iterations=10000):
 
     ax = plt.gca()
+    # ax_size = ax.get_window_extent().size
     inv = ax.transData.inverted()
 
     artist_coords = np.array([text_artist.get_position() for text_artist in text_artists])
     artist_coords = artist_coords+np.random.normal(0,0.001,artist_coords.shape)
     artist_extents = ([text_artist.get_window_extent() for text_artist in text_artists])
-    artist_extents = np.array([inv.transform(extent.get_points()) for extent in artist_extents])
-    artist_extents = artist_extents[:,1]-artist_extents[:,0]
+    artist_edges = np.array([inv.transform(extent.get_points()) for extent in artist_extents])
+    artist_extents = (artist_edges[:,1]-artist_edges[:,0])*0.5
+    artist_coords = artist_coords+artist_extents
 
-    initial_artist_coords = artist_coords.copy()
+    # print(artist_extents[50],artist_coords[50],artist_edges.shape)
+    # plt.scatter(*artist_coords.T,c='r',marker='x')
+    # plt.scatter(*(artist_coords+artist_extents*1).T  ,c='g',marker='x')
 
-    for i in range(max_iterations):
-        relative_positions_x = artist_coords[:,0][:,None]-artist_coords[:,0][None,:]
-        relative_positions_y = artist_coords[:,1][:,None]-artist_coords[:,1][None,:]
+    # initial_artist_coords = artist_coords.copy()
 
-        relative_positions_x/= 0.1+(artist_extents[:,0][:,None]+artist_extents[:,0][None,:])/2
-        relative_positions_y/= 0.1+(artist_extents[:,1][:,None]+artist_extents[:,1][None,:])/2
+    for i in range(100):
 
-        # distances = np.sqrt(relative_positions_x**2+relative_positions_y**2)
-        distances = np.abs(relative_positions_x)+np.abs(relative_positions_y)
+        
+        relative_positions_x = (artist_coords[:,0][:,None]-artist_coords[:,0][None,:])
+        relative_positions_y = (artist_coords[:,1][:,None]-artist_coords[:,1][None,:])
 
-        gaussian_repulsion = 1*np.exp(-distances/0.5)
+        relative_distances_x = np.abs(relative_positions_x)
+        relative_distances_y = np.abs(relative_positions_y)
+
+        relative_distances_x = relative_distances_x-artist_extents[:,0]
+        relative_distances_y = relative_distances_y-artist_extents[:,1]
+        relative_distances_x = relative_distances_x-artist_extents[:,None,0] 
+        relative_distances_y = relative_distances_y-artist_extents[:,None,1]
+        
+
+        intersection = (relative_distances_x<0)&(relative_distances_y<0)
+        
         
         velocities_x = np.zeros_like(relative_positions_x)
         velocities_y = np.zeros_like(relative_positions_y)
 
-        velocities_x[distances>0] = gaussian_repulsion[distances>0]*relative_positions_x[distances>0]/distances[distances>0]
-        velocities_y[distances>0] = gaussian_repulsion[distances>0]*relative_positions_y[distances>0]/distances[distances>0]
-        
+        velocities_x += relative_positions_x*intersection
+        velocities_y += relative_positions_y*intersection
+       
+       
         velocities_x[np.eye(velocities_x.shape[0],dtype=bool)]=0
         velocities_y[np.eye(velocities_y.shape[0],dtype=bool)]=0 
 
-        delta = np.stack([velocities_x,velocities_y],axis=1).mean(-1)
-        # # delta = delta.clip(-0.1,0.1)
-        artist_coords = artist_coords + delta*0.1
-        # artist_coords  = artist_coords*0.9 + initial_artist_coords*0.1
+        delta = np.stack([velocities_x,velocities_y],axis=1).sum(-1)
 
-
+        artist_coords = artist_coords + delta*0.07
+       
+       
     for i,text_artist in enumerate(text_artists):
-        text_artist.set_position(artist_coords[i,:])
+        text_artist.set_position(artist_coords[i,:]-artist_extents[i,:])
 
 # define a function that subsamples spots around x,y given a window size:
 def get_spatial_subsample_mask(coordinate_df,x,y,plot_window_size=5):
@@ -194,17 +226,17 @@ def get_knn_expression(distances,neighbor_indices,genes, gene_labels,bandwidth=2
     
     return local_expression
 
-# def pixelmap_to_raw(x,y,):
-#     shift_x = int((spot_df_raw.x/um_per_pixel).min())
-#     shift_y = int((spot_df_raw.y/um_per_pixel).min())
-#     return (x+shift_x)*um_per_pixel,(y+shift_y)*um_per_pixel
+@numba.njit(fastmath=True)
+def discounted_euclidean_grad(x, y,discount=0.5):
+    r"""Standard euclidean distance and its gradient.
+    ..math::
+        D(x, y) = \sqrt{\sum_i (x_i - y_i)^2}
+        \frac{dD(x, y)}{dx} = (x_i - y_i)/D(x,y)
+    """
 
-# def raw_to_pixelmap(x,y):
-#     x = ((spot_df_raw.x/um_per_pixel).astype(int))
-#     y = ((spot_df_raw.y/um_per_pixel).astype(int))
+    x_centered = x - y
+    result = np.sum(x_centered ** 2)
+    d = np.power(result,discount)
+    grad = 2*discount* x_centered * result**(1e-6 * (discount-1))
 
-#     return (x/um_per_pixel-x.min()),(y/um_per_pixel-y.min())
-
-# def get_celltype(expression_vector):
-#     return celltypes[np.argmax(np.corrcoef(expression_vector,signatures.values.T)[0,1:])]
-
+    return d, grad
