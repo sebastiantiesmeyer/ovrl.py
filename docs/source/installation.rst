@@ -4,8 +4,6 @@ Installation
 
 To install the necessary tools and dependencies for this project, follow the steps outlined below. These instructions will guide you through setting up the environment for both standard use and interactive analysis with Jupyter notebooks.
 
-.. note::
-   Make sure you have Python and pip installed on your machine before proceeding.
 
 Steps for Installation
 -----------------------
